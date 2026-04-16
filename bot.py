@@ -86,7 +86,7 @@ def format_instances(instances: list) -> str:
     lines = [f"⚠️ 你有 *{len(instances)}* 个实例正在运行：\n"]
     for inst in instances:
         iid     = inst.get("id", "N/A")
-        status  = inst.get("actual_status", inst.get("status", "unknown"))
+        label   = inst.get("label") or "_(无标签)_"
         gpu     = inst.get("gpu_name", "Unknown GPU")
         gpu_num = inst.get("num_gpus", 1)
         cost_hr = round(float(inst.get("dph_total", 0) or 0), 4)
@@ -104,8 +104,8 @@ def format_instances(instances: list) -> str:
 
         lines.append(
             f"🖥 *ID:* `{iid}`\n"
+            f"   标签: {label}\n"
             f"   GPU: {gpu_num}× {gpu}\n"
-            f"   状态: {status}\n"
             f"   运行时长: {uptime}\n"
             f"   费用: ${cost_hr}/hr\n"
         )
