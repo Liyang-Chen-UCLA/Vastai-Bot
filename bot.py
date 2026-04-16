@@ -1,6 +1,5 @@
 import os
 import json
-import asyncio
 import logging
 import requests
 from datetime import datetime
@@ -37,7 +36,7 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"OK")
 
     def log_message(self, *args):
-        pass  # 静默日志
+        pass
 
 
 def start_health_server():
@@ -62,19 +61,41 @@ def save_settings(settings: dict):
 
 
 def get_vast_instances(api_key: str) -> list:
-    """Fetch running instances from Vast.ai API."""
+    """Fetch all instances from Vast.ai API."""
     url = "https://console.vast.ai/api/v0/instances/"
     headers = {"Authorization": f"Bearer {api_key}"}
     try:
         resp = requests.get(url, headers=headers, timeout=15)
         resp.raise_for_status()
-        data = resp.json()
-        return data.get("instances", [])
+        return resp.json().get("instances", [])
     except requests.exceptions.HTTPError as e:
         logger.error(f"Vast.ai API HTTP error: {e}")
         raise
     except Exception as e:
         logger.error(f"Vast.ai API error: {e}")
+        raise
+
+
+def get_instance_by_id(api_key: str, instance_id: str) -> dict | None:
+    """Fetch a single instance by ID."""
+    for inst in get_vast_instances(api_key):
+        if str(inst.get("id")) == str(instance_id):
+            return inst
+    return None
+
+
+def destroy_vast_instance(api_key: str, instance_id: str):
+    """Destroy an instance by ID."""
+    url = f"https://console.vast.ai/api/v0/instances/{instance_id}/"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    try:
+        resp = requests.delete(url, headers=headers, timeout=15)
+        resp.raise_for_status()
+    except requests.exceptions.HTTPError as e:
+        logger.error(f"Destroy instance HTTP error: {e}")
+        raise
+    except Exception as e:
+        logger.error(f"Destroy instance error: {e}")
         raise
 
 
@@ -91,7 +112,6 @@ def format_instances(instances: list) -> str:
         gpu_num = inst.get("num_gpus", 1)
         cost_hr = round(float(inst.get("dph_total", 0) or 0), 4)
 
-        # uptime
         start_ts = inst.get("start_date")
         if start_ts:
             started = datetime.utcfromtimestamp(float(start_ts))
@@ -128,10 +148,11 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "👋 *Vast.ai 实例监控 Bot*\n\n"
         "可用命令：\n"
         "• `/setkey <API_KEY>` — 设置你的 Vast.ai API Key\n"
-        "• `/status` — 立即查询当前实例\n"
+        "• `/status` — 查询所有实例\n"
+        "• `/cost <ID>` — 查询指定实例的花费\n"
+        "• `/destroy <ID>` — 删除指定实例（不可恢复）\n"
         "• `/settime HH:MM <时区>` — 设置每日提醒时间\n"
         "  例：`/settime 09:00 Asia/Shanghai`\n"
-        "  例：`/settime 22:00 America/New_York`\n"
         "• `/reminder on|off` — 开关自动提醒\n"
         "• `/myconfig` — 查看当前配置\n"
         "• `/help` — 显示帮助\n\n"
@@ -188,6 +209,121 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(format_instances(instances), parse_mode="Markdown")
     except Exception as e:
         await update.message.reply_text(f"❌ 查询失败：{e}")
+
+
+async def cmd_cost(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """查询指定 instance ID 的花费详情。用法：/cost <ID>"""
+    chat_id  = str(update.effective_chat.id)
+    settings = load_settings()
+    api_key  = settings.get(chat_id, {}).get("api_key")
+
+    if not api_key:
+        await update.message.reply_text(
+            "⚠️ 请先用 `/setkey <API_KEY>` 设置 API Key。", parse_mode="Markdown"
+        )
+        return
+
+    if not ctx.args:
+        await update.message.reply_text(
+            "用法：`/cost <Instance ID>`\n例：`/cost 12345678`", parse_mode="Markdown"
+        )
+        return
+
+    instance_id = ctx.args[0].strip()
+    await update.message.reply_text("🔍 查询中…")
+
+    try:
+        inst = get_instance_by_id(api_key, instance_id)
+    except Exception as e:
+        await update.message.reply_text(f"❌ 查询失败：{e}")
+        return
+
+    if not inst:
+        await update.message.reply_text(
+            f"❌ 找不到 ID 为 `{instance_id}` 的实例。", parse_mode="Markdown"
+        )
+        return
+
+    label   = inst.get("label") or "_(无标签)_"
+    gpu     = inst.get("gpu_name", "Unknown GPU")
+    gpu_num = inst.get("num_gpus", 1)
+    cost_hr = round(float(inst.get("dph_total", 0) or 0), 4)
+
+    start_ts = inst.get("start_date")
+    if start_ts:
+        started     = datetime.utcfromtimestamp(float(start_ts))
+        delta       = datetime.utcnow() - started
+        total_hours = delta.total_seconds() / 3600
+        hours       = int(total_hours)
+        minutes     = int((delta.total_seconds() % 3600) // 60)
+        uptime      = f"{hours}h {minutes}m"
+        total_cost  = round(cost_hr * total_hours, 4)
+    else:
+        uptime     = "未知"
+        total_cost = 0.0
+
+    msg = (
+        f"💰 *实例花费详情*\n\n"
+        f"🖥 *ID:* `{instance_id}`\n"
+        f"   标签: {label}\n"
+        f"   GPU: {gpu_num}× {gpu}\n"
+        f"   运行时长: {uptime}\n"
+        f"   当前费率: ${cost_hr}/hr\n"
+        f"   *累计花费: ${total_cost}*"
+    )
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+
+async def cmd_destroy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """删除指定 instance ID。用法：/destroy <ID>"""
+    chat_id  = str(update.effective_chat.id)
+    settings = load_settings()
+    api_key  = settings.get(chat_id, {}).get("api_key")
+
+    if not api_key:
+        await update.message.reply_text(
+            "⚠️ 请先用 `/setkey <API_KEY>` 设置 API Key。", parse_mode="Markdown"
+        )
+        return
+
+    if not ctx.args:
+        await update.message.reply_text(
+            "用法：`/destroy <Instance ID>`\n例：`/destroy 12345678`", parse_mode="Markdown"
+        )
+        return
+
+    instance_id = ctx.args[0].strip()
+    await update.message.reply_text("🔍 查询实例信息…")
+
+    try:
+        inst = get_instance_by_id(api_key, instance_id)
+    except Exception as e:
+        await update.message.reply_text(f"❌ 查询失败：{e}")
+        return
+
+    if not inst:
+        await update.message.reply_text(
+            f"❌ 找不到 ID 为 `{instance_id}` 的实例。", parse_mode="Markdown"
+        )
+        return
+
+    label   = inst.get("label") or "_(无标签)_"
+    gpu     = inst.get("gpu_name", "Unknown GPU")
+    gpu_num = inst.get("num_gpus", 1)
+
+    await update.message.reply_text(
+        f"🗑 正在删除实例 `{instance_id}`（{label} · {gpu_num}× {gpu}）…",
+        parse_mode="Markdown",
+    )
+
+    try:
+        destroy_vast_instance(api_key, instance_id)
+        await update.message.reply_text(
+            f"✅ 实例 `{instance_id}` 已成功删除。",
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ 删除失败：{e}")
 
 
 async def cmd_settime(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -349,6 +485,8 @@ def main():
     app.add_handler(CommandHandler("help",     cmd_help))
     app.add_handler(CommandHandler("setkey",   cmd_setkey))
     app.add_handler(CommandHandler("status",   cmd_status))
+    app.add_handler(CommandHandler("cost",     cmd_cost))
+    app.add_handler(CommandHandler("destroy",  cmd_destroy))
     app.add_handler(CommandHandler("settime",  cmd_settime))
     app.add_handler(CommandHandler("reminder", cmd_reminder))
     app.add_handler(CommandHandler("myconfig", cmd_myconfig))
