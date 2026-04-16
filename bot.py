@@ -6,6 +6,8 @@ import requests
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import threading
 
 from telegram import Update, Bot
 from telegram.ext import (
@@ -15,7 +17,7 @@ from telegram.ext import (
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-# ── Logging ──────────────────────────────────────────────────────────────────
+# ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     level=logging.INFO,
@@ -23,8 +25,26 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ── Config paths ──────────────────────────────────────────────────────────────
-DATA_FILE = Path("data/settings.json")
+DATA_FILE = Path("/app/data/settings.json")
 DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+# ── Health Server（防止 Railway 免费版休眠）────────────────────────────────────
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+    def log_message(self, *args):
+        pass  # 静默日志
+
+
+def start_health_server():
+    server = HTTPServer(("0.0.0.0", 8080), HealthHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    logger.info("Health server started on port 8080")
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -65,22 +85,20 @@ def format_instances(instances: list) -> str:
 
     lines = [f"⚠️ 你有 *{len(instances)}* 个实例正在运行：\n"]
     for inst in instances:
-        iid      = inst.get("id", "N/A")
-        status   = inst.get("actual_status", inst.get("status", "unknown"))
-        gpu      = inst.get("gpu_name", "Unknown GPU")
-        gpu_num  = inst.get("num_gpus", 1)
-        cost_hr  = inst.get("dph_total", 0) or 0
-        cost_hr  = round(float(cost_hr), 4)
-        image    = inst.get("image_uuid", inst.get("image_runtype", ""))
+        iid     = inst.get("id", "N/A")
+        status  = inst.get("actual_status", inst.get("status", "unknown"))
+        gpu     = inst.get("gpu_name", "Unknown GPU")
+        gpu_num = inst.get("num_gpus", 1)
+        cost_hr = round(float(inst.get("dph_total", 0) or 0), 4)
 
         # uptime
         start_ts = inst.get("start_date")
         if start_ts:
-            started  = datetime.utcfromtimestamp(float(start_ts))
-            delta    = datetime.utcnow() - started
-            hours    = int(delta.total_seconds() // 3600)
-            minutes  = int((delta.total_seconds() % 3600) // 60)
-            uptime   = f"{hours}h {minutes}m"
+            started = datetime.utcfromtimestamp(float(start_ts))
+            delta   = datetime.utcnow() - started
+            hours   = int(delta.total_seconds() // 3600)
+            minutes = int((delta.total_seconds() % 3600) // 60)
+            uptime  = f"{hours}h {minutes}m"
         else:
             uptime = "未知"
 
@@ -100,9 +118,8 @@ def format_instances(instances: list) -> str:
 # ── Command Handlers ──────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    chat_id = str(update.effective_chat.id)
+    chat_id  = str(update.effective_chat.id)
     settings = load_settings()
-
     if chat_id not in settings:
         settings[chat_id] = {}
         save_settings(settings)
@@ -130,11 +147,12 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_setkey(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     if not ctx.args:
-        await update.message.reply_text("用法：`/setkey <你的Vast.ai API Key>`", parse_mode="Markdown")
+        await update.message.reply_text(
+            "用法：`/setkey <你的Vast.ai API Key>`", parse_mode="Markdown"
+        )
         return
 
     api_key = ctx.args[0].strip()
-    # Quick validation
     try:
         instances = get_vast_instances(api_key)
     except Exception:
@@ -154,20 +172,20 @@ async def cmd_setkey(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    chat_id = str(update.effective_chat.id)
+    chat_id  = str(update.effective_chat.id)
     settings = load_settings()
-    user_cfg = settings.get(chat_id, {})
-    api_key  = user_cfg.get("api_key")
+    api_key  = settings.get(chat_id, {}).get("api_key")
 
     if not api_key:
-        await update.message.reply_text("⚠️ 请先用 `/setkey <API_KEY>` 设置 API Key。", parse_mode="Markdown")
+        await update.message.reply_text(
+            "⚠️ 请先用 `/setkey <API_KEY>` 设置 API Key。", parse_mode="Markdown"
+        )
         return
 
     await update.message.reply_text("🔍 查询中…")
     try:
         instances = get_vast_instances(api_key)
-        msg = format_instances(instances)
-        await update.message.reply_text(msg, parse_mode="Markdown")
+        await update.message.reply_text(format_instances(instances), parse_mode="Markdown")
     except Exception as e:
         await update.message.reply_text(f"❌ 查询失败：{e}")
 
@@ -179,7 +197,7 @@ async def cmd_settime(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "用法：`/settime HH:MM <时区>`\n"
             "例：`/settime 09:00 Asia/Shanghai`\n"
             "例：`/settime 22:00 America/New_York`\n\n"
-            "时区列表参考：https://en.wikipedia.org/wiki/List_of_tz_database_time_zones",
+            "时区列表：https://en.wikipedia.org/wiki/List_of_tz_database_time_zones",
             parse_mode="Markdown",
         )
         return
@@ -187,18 +205,20 @@ async def cmd_settime(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     time_str = ctx.args[0].strip()
     tz_str   = ctx.args[1].strip() if len(ctx.args) > 1 else "UTC"
 
-    # Validate time
     try:
-        t = datetime.strptime(time_str, "%H:%M")
+        datetime.strptime(time_str, "%H:%M")
     except ValueError:
-        await update.message.reply_text("❌ 时间格式错误，请用 HH:MM，例如 `09:00`", parse_mode="Markdown")
+        await update.message.reply_text(
+            "❌ 时间格式错误，请用 HH:MM，例如 `09:00`", parse_mode="Markdown"
+        )
         return
 
-    # Validate timezone
     try:
         ZoneInfo(tz_str)
     except (ZoneInfoNotFoundError, KeyError):
-        await update.message.reply_text(f"❌ 时区 `{tz_str}` 无效，请参考 tz database 格式。", parse_mode="Markdown")
+        await update.message.reply_text(
+            f"❌ 时区 `{tz_str}` 无效，请参考 tz database 格式。", parse_mode="Markdown"
+        )
         return
 
     settings = load_settings()
@@ -209,7 +229,6 @@ async def cmd_settime(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     settings[chat_id].setdefault("reminder_on", True)
     save_settings(settings)
 
-    # Reschedule
     reschedule_all(ctx.application.bot)
 
     await update.message.reply_text(
@@ -222,7 +241,9 @@ async def cmd_settime(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_reminder(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     if not ctx.args or ctx.args[0].lower() not in ("on", "off"):
-        await update.message.reply_text("用法：`/reminder on` 或 `/reminder off`", parse_mode="Markdown")
+        await update.message.reply_text(
+            "用法：`/reminder on` 或 `/reminder off`", parse_mode="Markdown"
+        )
         return
 
     on = ctx.args[0].lower() == "on"
@@ -232,7 +253,7 @@ async def cmd_reminder(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     settings[chat_id]["reminder_on"] = on
     save_settings(settings)
 
-    reschedule_all(update.get_bot() if hasattr(update, "get_bot") else None)
+    reschedule_all(ctx.application.bot)
 
     status = "已开启 ✅" if on else "已关闭 🔕"
     await update.message.reply_text(f"自动提醒{status}")
@@ -243,18 +264,18 @@ async def cmd_myconfig(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     settings = load_settings()
     user_cfg = settings.get(chat_id, {})
 
-    has_key  = "✅ 已设置" if user_cfg.get("api_key") else "❌ 未设置"
-    r_time   = user_cfg.get("remind_time", "未设置")
-    r_tz     = user_cfg.get("remind_tz", "UTC")
-    r_on     = "开启 ✅" if user_cfg.get("reminder_on", False) else "关闭 🔕"
+    has_key = "✅ 已设置" if user_cfg.get("api_key") else "❌ 未设置"
+    r_time  = user_cfg.get("remind_time", "未设置")
+    r_tz    = user_cfg.get("remind_tz", "UTC")
+    r_on    = "开启 ✅" if user_cfg.get("reminder_on", False) else "关闭 🔕"
 
-    text = (
+    await update.message.reply_text(
         f"*当前配置*\n\n"
         f"API Key：{has_key}\n"
         f"提醒时间：{r_time} ({r_tz})\n"
-        f"自动提醒：{r_on}"
+        f"自动提醒：{r_on}",
+        parse_mode="Markdown",
     )
-    await update.message.reply_text(text, parse_mode="Markdown")
 
 
 # ── Scheduler ─────────────────────────────────────────────────────────────────
@@ -268,13 +289,9 @@ async def daily_check(chat_id: str, api_key: str, bot: Bot):
         instances = get_vast_instances(api_key)
         if instances:
             msg = f"⏰ *每日提醒*\n\n{format_instances(instances)}"
-            await bot.send_message(chat_id=int(chat_id), text=msg, parse_mode="Markdown")
         else:
-            await bot.send_message(
-                chat_id=int(chat_id),
-                text="⏰ *每日提醒*\n\n✅ 当前没有运行中的实例，一切正常～",
-                parse_mode="Markdown",
-            )
+            msg = "⏰ *每日提醒*\n\n✅ 当前没有运行中的实例，一切正常～"
+        await bot.send_message(chat_id=int(chat_id), text=msg, parse_mode="Markdown")
     except Exception as e:
         logger.error(f"daily_check error for {chat_id}: {e}")
         try:
@@ -292,9 +309,9 @@ def reschedule_all(bot: Bot):
     for chat_id, cfg in settings.items():
         if not cfg.get("reminder_on"):
             continue
-        api_key    = cfg.get("api_key")
-        r_time     = cfg.get("remind_time")
-        r_tz       = cfg.get("remind_tz", "UTC")
+        api_key = cfg.get("api_key")
+        r_time  = cfg.get("remind_time")
+        r_tz    = cfg.get("remind_tz", "UTC")
 
         if not api_key or not r_time:
             continue
@@ -320,6 +337,8 @@ def reschedule_all(bot: Bot):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
+    start_health_server()
+
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not token:
         raise RuntimeError("Missing TELEGRAM_BOT_TOKEN environment variable")
@@ -334,7 +353,6 @@ def main():
     app.add_handler(CommandHandler("reminder", cmd_reminder))
     app.add_handler(CommandHandler("myconfig", cmd_myconfig))
 
-    # Start scheduler after bot is ready
     async def on_startup(application):
         reschedule_all(application.bot)
         if not scheduler.running:
