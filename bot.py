@@ -310,9 +310,30 @@ async def cmd_destroy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     label   = inst.get("label") or "_(无标签)_"
     gpu     = inst.get("gpu_name", "Unknown GPU")
     gpu_num = inst.get("num_gpus", 1)
+    cost_hr = round(float(inst.get("dph_total", 0) or 0), 4)
+
+    start_ts = inst.get("start_date")
+    if start_ts:
+        started     = datetime.utcfromtimestamp(float(start_ts))
+        delta       = datetime.utcnow() - started
+        total_hours = delta.total_seconds() / 3600
+        hours       = int(total_hours)
+        minutes     = int((delta.total_seconds() % 3600) // 60)
+        uptime      = f"{hours}h {minutes}m"
+        total_cost  = round(cost_hr * total_hours, 4)
+    else:
+        uptime     = "未知"
+        total_cost = 0.0
 
     await update.message.reply_text(
-        f"🗑 正在删除实例 `{instance_id}`（{label} · {gpu_num}× {gpu}）…",
+        "🗑 *删除前花费摘要*\n\n"
+        f"🖥 *ID:* `{instance_id}`\n"
+        f"   标签: {label}\n"
+        f"   GPU: {gpu_num}× {gpu}\n"
+        f"   运行时长: {uptime}\n"
+        f"   费率: ${cost_hr}/hr\n"
+        f"   *累计花费: ${total_cost}*\n\n"
+        "正在删除…",
         parse_mode="Markdown",
     )
 
