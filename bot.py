@@ -150,6 +150,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "• `/setkey <API_KEY>` — 设置你的 Vast.ai API Key\n"
         "• `/status` — 查询所有实例\n"
         "• `/cost <ID>` — 查询指定实例的花费\n"
+        "• `/info <ID>` — 查询实例的 TFLOPS / GPU RAM / Disk 状态\n"
         "• `/destroy <ID>` — 删除指定实例（不可恢复）\n"
         "• `/settime HH:MM <时区>` — 设置每日提醒时间\n"
         "  例：`/settime 09:00 Asia/Shanghai`\n"
@@ -347,6 +348,93 @@ async def cmd_destroy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ 删除失败：{e}")
 
 
+async def cmd_info(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """查询指定实例的硬件状态。用法：/info <ID>"""
+    chat_id  = str(update.effective_chat.id)
+    settings = load_settings()
+    api_key  = settings.get(chat_id, {}).get("api_key")
+
+    if not api_key:
+        await update.message.reply_text(
+            "⚠️ 请先用 `/setkey <API_KEY>` 设置 API Key。", parse_mode="Markdown"
+        )
+        return
+
+    if not ctx.args:
+        await update.message.reply_text(
+            "用法：`/info <Instance ID>`\n例：`/info 12345678`", parse_mode="Markdown"
+        )
+        return
+
+    instance_id = ctx.args[0].strip()
+    await update.message.reply_text("🔍 查询中…")
+
+    try:
+        inst = get_instance_by_id(api_key, instance_id)
+    except Exception as e:
+        await update.message.reply_text(f"❌ 查询失败：{e}")
+        return
+
+    if not inst:
+        await update.message.reply_text(
+            f"❌ 找不到 ID 为 `{instance_id}` 的实例。", parse_mode="Markdown"
+        )
+        return
+
+    # TFLOPS
+    tflops_total = inst.get("flops_per_dphtotal") or inst.get("total_flops") or 0
+    tflops_max   = inst.get("tflops", 0) or 0
+
+    # GPU RAM（单位 GB）
+    vram_used = inst.get("gpu_mem_bw_used") or inst.get("gpu_ram") or 0
+    vram_total = inst.get("gpu_totalram") or inst.get("gpu_ram") or 0
+    # Vast.ai 返回 MB，转换为 GB
+    vram_used_gb  = round(float(vram_used)  / 1024, 1) if vram_used  else None
+    vram_total_gb = round(float(vram_total) / 1024, 1) if vram_total else None
+
+    # 也尝试直接读取 display 字段（已格式化）
+    vram_display = inst.get("gpu_mem_usage")  # e.g. "52.5/95.6 GB"
+
+    # Disk
+    disk_used_gb  = round(float(inst.get("disk_util",  0) or 0), 1)
+    disk_total_gb = round(float(inst.get("disk_space", 0) or 0), 1)
+
+    # GPU 规格
+    gpu_name = inst.get("gpu_name", "Unknown GPU")
+    gpu_num  = inst.get("num_gpus", 1)
+
+    # 组装 VRAM 显示
+    if vram_display:
+        vram_str = vram_display
+    elif vram_total_gb:
+        vram_str = f"{vram_used_gb}/{vram_total_gb} GB" if vram_used_gb else f"{vram_total_gb} GB"
+    else:
+        # fallback：从 format_instances 中已有的字段读取
+        vram_str = "N/A"
+
+    # TFLOPS 显示
+    if tflops_max:
+        tflops_str = f"{round(float(tflops_max), 1)} TFLOPS"
+    else:
+        tflops_str = "N/A"
+
+    # Disk 显示
+    if disk_total_gb:
+        disk_str = f"{disk_used_gb}/{disk_total_gb} GB"
+    else:
+        disk_str = "N/A"
+
+    msg = (
+        f"📊 *实例状态详情*\n\n"
+        f"🖥 *ID:* `{instance_id}`\n"
+        f"   GPU: {gpu_num}× {gpu_name}\n\n"
+        f"⚡ *TFLOPS:* {tflops_str}\n"
+        f"🧠 *GPU RAM:* {vram_str}\n"
+        f"💾 *Disk:* {disk_str}\n"
+    )
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+
 async def cmd_settime(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     if len(ctx.args) < 1:
@@ -507,6 +595,7 @@ def main():
     app.add_handler(CommandHandler("setkey",   cmd_setkey))
     app.add_handler(CommandHandler("status",   cmd_status))
     app.add_handler(CommandHandler("cost",     cmd_cost))
+    app.add_handler(CommandHandler("info",     cmd_info))
     app.add_handler(CommandHandler("destroy",  cmd_destroy))
     app.add_handler(CommandHandler("settime",  cmd_settime))
     app.add_handler(CommandHandler("reminder", cmd_reminder))
